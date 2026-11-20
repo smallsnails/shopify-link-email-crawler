@@ -1,0 +1,7 @@
+# 每行一个 CSS 选择器，格式：位置=选择器（位置可省略）
+# 命中后会按顺序叠加到内置选择器之前
+header=#shopify-section-header a[href]
+footer=#shopify-section-footer a[href]
+header=header.site-header a[href]
+footer=#footer a[href]
+nav=nav.menu a[href]
