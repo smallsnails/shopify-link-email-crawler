@@ -135,6 +135,10 @@ func (c *Crawler) CrawlSite(ctx context.Context, seed string) error {
 			if r.item.depth >= c.cfg.Depth {
 				continue
 			}
+			// 默认只抓「首页 + 优先路径」；开关打开后才跟进页面里的其他链接
+			if !c.cfg.AllLinks {
+				continue
+			}
 			for _, l := range r.links {
 				if !l.Crawlable {
 					continue
@@ -163,11 +167,15 @@ func (c *Crawler) CrawlSite(ctx context.Context, seed string) error {
 	}
 
 	nPages, nLinks, nMail := c.countFor(root)
+	mode := "仅首页+优先路径"
+	if c.cfg.AllLinks {
+		mode = "首页+优先路径+链接页"
+	}
 	if c.linkTruncated[root] {
-		fmt.Printf("  站点 %s 完成：页面 %d，链接 %d（已达上限 %d，已截断），邮箱 %d\n",
-			root, nPages, nLinks, c.cfg.MaxLinksPerSite, nMail)
+		fmt.Printf("  站点 %s 完成[%s]：页面 %d，链接 %d（已达上限 %d，已截断），邮箱 %d\n",
+			root, mode, nPages, nLinks, c.cfg.MaxLinksPerSite, nMail)
 	} else {
-		fmt.Printf("  站点 %s 完成：页面 %d，链接 %d，邮箱 %d\n", root, nPages, nLinks, nMail)
+		fmt.Printf("  站点 %s 完成[%s]：页面 %d，链接 %d，邮箱 %d\n", root, mode, nPages, nLinks, nMail)
 	}
 	return nil
 }

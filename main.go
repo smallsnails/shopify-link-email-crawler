@@ -45,6 +45,8 @@ type Config struct {
 	MaxLinksPerSite int
 	// 优先探测的联系页路径；nil 表示关闭该功能
 	PriorityPaths []string
+	// 是否额外抓取页面里的其他链接页（默认 false，只抓首页+优先路径）
+	AllLinks bool
 }
 
 type multiFlag []string
@@ -73,13 +75,15 @@ func run() error {
 	var workers int
 	flag.IntVar(&workers, "c", 6, "页面并发数")
 	var maxPages int
-	flag.IntVar(&maxPages, "max-pages", 100, "每个站点最多抓取页面数（含优先路径探测，建议 100 以内）")
+	flag.IntVar(&maxPages, "max-pages", 30, "每个站点最多抓取页面数（默认模式 25 个名额即够：首页+24 条优先路径）")
 	var maxLinks int
-	flag.IntVar(&maxLinks, "max-links", 1000, "每个站点保留在链接清单中的最大条数，0 表示不限制")
+	flag.IntVar(&maxLinks, "max-links", 100, "每个站点保留在链接清单中的最大条数，0 表示不限制")
 	var priorityFile string
 	flag.StringVar(&priorityFile, "priority-file", "", "自定义优先探测路径文件（每行一个以 / 开头的路径）")
 	var noPriority bool
 	flag.BoolVar(&noPriority, "no-priority", false, "关闭优先路径探测，仅按链接抓取")
+	var allLinks bool
+	flag.BoolVar(&allLinks, "all-links", false, "额外抓取页面里的其他链接页（默认关闭，只抓首页+优先路径，速度快）")
 	var depth int
 	flag.IntVar(&depth, "depth", 1, "抓取深度（1=首页+首页里的链接页）")
 	var verify bool
@@ -192,6 +196,7 @@ func run() error {
 		VerifyExternal:  verifyExternal,
 		MaxLinksPerSite: maxLinks,
 		PriorityPaths:   priority,
+		AllLinks:        allLinks,
 	}
 
 	// ---- 规范化入口 ----
