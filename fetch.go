@@ -119,6 +119,12 @@ func (f *Fetcher) Get(ctx context.Context, rawurl string) (*Response, error) {
 	return f.do(ctx, http.MethodGet, rawurl, 0, 3)
 }
 
+// Probe 抓取优先路径探测页：不重试。探测页大概率大量 404/超时，
+// 每个失败都重试 3 次会把死站点拖到几十分钟。
+func (f *Fetcher) Probe(ctx context.Context, rawurl string) (*Response, error) {
+	return f.do(ctx, http.MethodGet, rawurl, 0, 1)
+}
+
 // Head 只探测状态码；服务端不支持 HEAD 时回退 GET。校验场景不重试，避免整体变慢。
 func (f *Fetcher) Head(ctx context.Context, rawurl string) (*Response, error) {
 	resp, err := f.do(ctx, http.MethodHead, rawurl, 0, 1)

@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -84,6 +85,8 @@ func run() error {
 	flag.BoolVar(&noPriority, "no-priority", false, "关闭优先路径探测，仅按链接抓取")
 	var allLinks bool
 	flag.BoolVar(&allLinks, "all-links", false, "额外抓取页面里的其他链接页（默认关闭，只抓首页+优先路径，速度快）")
+	var siteWorkers int
+	flag.IntVar(&siteWorkers, "site-workers", 3, "同时抓取的站点数（不同站点是不同域名，各自独立限速，互不等待）")
 	var depth int
 	flag.IntVar(&depth, "depth", 1, "抓取深度（1=首页+首页里的链接页）")
 	var verify bool
@@ -159,6 +162,12 @@ func run() error {
 	if depth < 0 {
 		depth = 0
 	}
+	if siteWorkers < 1 {
+		siteWorkers = 1
+	}
+	if siteWorkers > 8 {
+		siteWorkers = 8
+	}
 
 	rules := append([]SelectorRule{}, DefaultSelectorRules...)
 	if selFile != "" {
@@ -227,12 +236,23 @@ func run() error {
 	cr := NewCrawler(cfg)
 	start := time.Now()
 
+	// 站点级并行：不同站点是不同域名，各自走独立限速队列，互不阻塞。
+	// 站点内部仍按 delay 对同一域名串行，礼貌性不受影响。
+	sem := make(chan struct{}, siteWorkers)
+	var siteWG sync.WaitGroup
 	for i, seed := range cfg.Seeds {
-		fmt.Printf("\n[%d/%d] 开始抓取 %s\n", i+1, len(cfg.Seeds), seed)
-		if err := cr.CrawlSite(ctx, seed); err != nil {
-			fmt.Printf("  [警告] %v\n", err)
-		}
+		siteWG.Add(1)
+		sem <- struct{}{}
+		go func(i int, seed string) {
+			defer siteWG.Done()
+			defer func() { <-sem }()
+			fmt.Printf("\n[%d/%d] 开始抓取 %s\n", i+1, len(cfg.Seeds), seed)
+			if err := cr.CrawlSite(ctx, seed); err != nil {
+				fmt.Printf("  [警告] %v\n", err)
+			}
+		}(i, seed)
 	}
+	siteWG.Wait()
 
 	if cfg.Verify {
 		fmt.Printf("\n[校验] 正在检测链接可用性 ...\n")
