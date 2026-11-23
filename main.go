@@ -50,6 +50,8 @@ type Config struct {
 	AllLinks bool
 	// 所有域名共享的全局最小请求间隔，限制单 IP 总速率（Shopify/Cloudflare 走 IP 级限流）
 	GlobalDelay time.Duration
+	// 批次结束后是否对持续 429 的站点冷却补抓一轮
+	RetryBlocked bool
 }
 
 type multiFlag []string
@@ -90,7 +92,9 @@ func run() error {
 	var siteWorkers int
 	flag.IntVar(&siteWorkers, "site-workers", 3, "同时抓取的站点数（不同站点是不同域名，各自独立限速，互不等待）")
 	var globalDelay time.Duration
-	flag.DurationVar(&globalDelay, "global-delay", 200*time.Millisecond, "所有域名共享的全局最小请求间隔，限制单 IP 对 CDN 的总压力")
+	flag.DurationVar(&globalDelay, "global-delay", 2*time.Second, "所有域名共享的全局最小请求间隔（单 IP 总速率封顶 = 1/此值）。默认 2s = 0.5 请求/秒，最保守；跑得顺可降回 1s 或 500ms 提速")
+	var retryBlocked bool
+	flag.BoolVar(&retryBlocked, "retry-blocked", true, "批次结束后冷却 90s，对持续 429 的站点自动补抓一轮")
 	var depth int
 	flag.IntVar(&depth, "depth", 1, "抓取深度（1=首页+首页里的链接页）")
 	var verify bool
@@ -211,6 +215,7 @@ func run() error {
 		PriorityPaths:   priority,
 		AllLinks:        allLinks,
 		GlobalDelay:     globalDelay,
+		RetryBlocked:    retryBlocked,
 	}
 
 	// ---- 规范化入口 ----
@@ -246,6 +251,10 @@ func run() error {
 	sem := make(chan struct{}, siteWorkers)
 	var siteWG sync.WaitGroup
 	for i, seed := range cfg.Seeds {
+		if ctx.Err() != nil {
+			fmt.Printf("\n[中止] 已停止，剩余 %d 个站点未抓取\n", len(cfg.Seeds)-i)
+			break
+		}
 		siteWG.Add(1)
 		sem <- struct{}{}
 		go func(i int, seed string) {
@@ -258,6 +267,27 @@ func run() error {
 		}(i, seed)
 	}
 	siteWG.Wait()
+
+	// 持续 429 的站点：等 IP 冷却后再补抓一轮（重试期间它们不再刷新惩罚）
+	if cfg.RetryBlocked {
+		if blocked := cr.BlockedSeeds(); len(blocked) > 0 && ctx.Err() == nil {
+			fmt.Printf("\n[补抓] %d 个站点因持续 429 被拒，冷却 90s 后重试 ...\n", len(blocked))
+			select {
+			case <-ctx.Done():
+				fmt.Printf("[中止] 补抓取消\n")
+			case <-time.After(90 * time.Second):
+				for _, seed := range blocked {
+					if ctx.Err() != nil {
+						break
+					}
+					fmt.Printf("\n[补抓] 开始抓取 %s\n", seed)
+					if err := cr.CrawlSite(ctx, seed); err != nil {
+						fmt.Printf("  [警告] %v\n", err)
+					}
+				}
+			}
+		}
+	}
 
 	if cfg.Verify {
 		fmt.Printf("\n[校验] 正在检测链接可用性 ...\n")

@@ -60,6 +60,7 @@ type Crawler struct {
 
 	linkCount     map[string]int  // 每个站点已收录的链接数
 	linkTruncated map[string]bool // 链接清单是否被截断
+	blocked       []string        // 首页持续 429 的站点（等待批次结束后冷却重试）
 }
 
 func NewCrawler(cfg *Config) *Crawler {
@@ -107,6 +108,9 @@ func (c *Crawler) CrawlSite(ctx context.Context, seed string) error {
 	}
 	pg := home.page
 	for retry := 0; pg.Err != "" && pg.StatusCode == http.StatusTooManyRequests && retry < 2; retry++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		wait := time.Duration(10*(retry+1)) * time.Second
 		fmt.Printf("  首页被限流(HTTP 429)，冷却 %v 后重试 (%d/2) ...\n", wait, retry+1)
 		select {
@@ -120,11 +124,22 @@ func (c *Crawler) CrawlSite(ctx context.Context, seed string) error {
 	fetched = 1
 
 	switch {
+	case ctx.Err() != nil:
+		// 用户 Ctrl+C：安静退出，不给 50 个站点各刷一行“无法访问”
+		return ctx.Err()
 	case pg.Err != "" && pg.StatusCode == 0:
 		fmt.Printf("  ✗ 首页无法访问（%s），整站跳过\n", pg.Err)
 		return nil
 	case pg.Err != "":
-		fmt.Printf("  ✗ 首页 %s，冷却重试仍失败，跳过该站\n", pg.Err)
+		if pg.StatusCode == http.StatusTooManyRequests {
+			// 持续 429：记入待重试名单，等批次跑完 IP 冷却后再补一轮
+			fmt.Printf("  ⏸ 首页持续 HTTP 429，记入待重试名单（批次结束后自动补抓）\n")
+			c.mu.Lock()
+			c.blocked = append(c.blocked, seed)
+			c.mu.Unlock()
+		} else {
+			fmt.Printf("  ✗ 首页 %s，跳过该站\n", pg.Err)
+		}
 		return nil
 	}
 
@@ -497,6 +512,13 @@ func (c *Crawler) VerifyLinks(ctx context.Context) {
 		}
 	}
 	fmt.Printf("  已校验 %d 个链接\n", len(targets))
+}
+
+// BlockedSeeds 返回因持续 429 而未能抓取的站点清单。
+func (c *Crawler) BlockedSeeds() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string{}, c.blocked...)
 }
 
 // Snapshot 生成导出用的数据快照。
