@@ -48,6 +48,8 @@ type Config struct {
 	PriorityPaths []string
 	// 是否额外抓取页面里的其他链接页（默认 false，只抓首页+优先路径）
 	AllLinks bool
+	// 所有域名共享的全局最小请求间隔，限制单 IP 总速率（Shopify/Cloudflare 走 IP 级限流）
+	GlobalDelay time.Duration
 }
 
 type multiFlag []string
@@ -87,6 +89,8 @@ func run() error {
 	flag.BoolVar(&allLinks, "all-links", false, "额外抓取页面里的其他链接页（默认关闭，只抓首页+优先路径，速度快）")
 	var siteWorkers int
 	flag.IntVar(&siteWorkers, "site-workers", 3, "同时抓取的站点数（不同站点是不同域名，各自独立限速，互不等待）")
+	var globalDelay time.Duration
+	flag.DurationVar(&globalDelay, "global-delay", 200*time.Millisecond, "所有域名共享的全局最小请求间隔，限制单 IP 对 CDN 的总压力")
 	var depth int
 	flag.IntVar(&depth, "depth", 1, "抓取深度（1=首页+首页里的链接页）")
 	var verify bool
@@ -206,6 +210,7 @@ func run() error {
 		MaxLinksPerSite: maxLinks,
 		PriorityPaths:   priority,
 		AllLinks:        allLinks,
+		GlobalDelay:     globalDelay,
 	}
 
 	// ---- 规范化入口 ----

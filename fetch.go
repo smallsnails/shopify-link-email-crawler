@@ -24,23 +24,25 @@ type Response struct {
 	Header      http.Header
 }
 
-// Fetcher 带“单域名串行限速 + 429 冷却 + 重试 + robots”的 HTTP 客户端。
+// Fetcher 带“单域名串行限速 + 全局节奏 + 429 冷却 + 重试 + robots”的 HTTP 客户端。
 type Fetcher struct {
-	client  *http.Client
-	ua      string
-	delay   time.Duration
-	maxBody int64
+	client      *http.Client
+	ua          string
+	delay       time.Duration
+	globalDelay time.Duration
+	maxBody     int64
 
-	mu       sync.Mutex
-	lastHit  map[string]time.Time // 每个域名的下一次可用时间（含预约）
-	cooldown map[string]time.Time // 被 429/503 惩罚的冷却截止时间
+	mu         sync.Mutex
+	lastHit    map[string]time.Time // 每个域名的下一次可用时间（含预约）
+	cooldown   map[string]time.Time // 被 429/503 惩罚的冷却截止时间
+	globalNext time.Time            // 全局下一个可用时点（跨域名共享）
 
 	robotsMu  sync.Mutex
 	robots    map[string]*robotsRules
 	useRobots bool
 }
 
-func NewFetcher(timeout time.Duration, ua string, delay time.Duration, useRobots bool) *Fetcher {
+func NewFetcher(timeout time.Duration, ua string, delay time.Duration, globalDelay time.Duration, useRobots bool) *Fetcher {
 	tr := &http.Transport{
 		MaxIdleConns:        200,
 		MaxIdleConnsPerHost: 16,
@@ -60,13 +62,14 @@ func NewFetcher(timeout time.Duration, ua string, delay time.Duration, useRobots
 				return nil
 			},
 		},
-		ua:        ua,
-		delay:     delay,
-		maxBody:   6 << 20, // 6MB
-		lastHit:   map[string]time.Time{},
-		cooldown:  map[string]time.Time{},
-		robots:    map[string]*robotsRules{},
-		useRobots: useRobots,
+		ua:          ua,
+		delay:       delay,
+		globalDelay: globalDelay,
+		maxBody:     6 << 20, // 6MB
+		lastHit:     map[string]time.Time{},
+		cooldown:    map[string]time.Time{},
+		robots:      map[string]*robotsRules{},
+		useRobots:   useRobots,
 	}
 }
 
@@ -87,6 +90,17 @@ func (f *Fetcher) waitTurn(ctx context.Context, host string) error {
 		}
 	}
 	f.lastHit[host] = now.Add(wait)
+	if f.globalDelay > 0 {
+		// 全局时隙：无论多少站点并行，同一 IP 的总速率不超过 1/globalDelay
+		next := f.globalNext
+		if min := now.Add(f.globalDelay); next.Before(min) {
+			next = min
+		}
+		f.globalNext = next
+		if w := next.Sub(now); w > wait {
+			wait = w
+		}
+	}
 	f.mu.Unlock()
 
 	if wait <= 0 {
@@ -103,10 +117,10 @@ func (f *Fetcher) waitTurn(ctx context.Context, host string) error {
 func (f *Fetcher) coolDown(host string, retryAfter time.Duration, attempt int) {
 	d := retryAfter
 	if d <= 0 {
-		d = time.Duration(2*(attempt+1)) * time.Second
+		d = time.Duration(5*(attempt+1)) * time.Second
 	}
-	if d > 15*time.Second {
-		d = 15 * time.Second
+	if d > 30*time.Second {
+		d = 30 * time.Second
 	}
 	f.mu.Lock()
 	f.cooldown[host] = time.Now().Add(d)

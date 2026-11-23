@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -63,7 +65,7 @@ type Crawler struct {
 func NewCrawler(cfg *Config) *Crawler {
 	return &Crawler{
 		cfg:           cfg,
-		fetcher:       NewFetcher(cfg.Timeout, cfg.UA, cfg.Delay, cfg.Robots),
+		fetcher:       NewFetcher(cfg.Timeout, cfg.UA, cfg.Delay, cfg.GlobalDelay, cfg.Robots),
 		pageKeys:      map[string]int{},
 		linkKeys:      map[string]bool{},
 		emailKeys:     map[string]bool{},
@@ -73,7 +75,11 @@ func NewCrawler(cfg *Config) *Crawler {
 	}
 }
 
-// CrawlSite 抓取一个站点：首页 + 深度限制内的链接页。
+// CrawlSite 抓取一个站点：首页 + 优先路径（--all-links 开启时含链接页）。
+// 首页处理策略：
+//   - 网络层失败（DNS 挂/超时/拒连）→ 站点真死，短路跳过，省掉 25 个探测请求
+//   - HTTP 429 → 冷却 10s/20s 重试最多 2 次，仍失败才放弃（Cloudflare 的 IP
+//     惩罚一般几十秒解除，不能一棒子打死）
 func (c *Crawler) CrawlSite(ctx context.Context, seed string) error {
 	u, err := url.Parse(seed)
 	if err != nil {
@@ -92,32 +98,78 @@ func (c *Crawler) CrawlSite(ctx context.Context, seed string) error {
 	c.mu.Unlock()
 
 	visited := map[string]bool{canonicalURL(seed): true}
-	current := []queueItem{{url: seed, depth: 0}}
 	fetched := 0
-	priorityPending := len(c.cfg.PriorityPaths) > 0
-	homeFailed := false
 
-	for len(current) > 0 {
+	// ---- 首页（含 429 冷却重试）----
+	home := c.fetchLevel(ctx, []queueItem{{url: seed, depth: 0}}, root)[0]
+	if home.page == nil {
+		return fmt.Errorf("首页抓取异常: %s", seed)
+	}
+	pg := home.page
+	for retry := 0; pg.Err != "" && pg.StatusCode == http.StatusTooManyRequests && retry < 2; retry++ {
+		wait := time.Duration(10*(retry+1)) * time.Second
+		fmt.Printf("  首页被限流(HTTP 429)，冷却 %v 后重试 (%d/2) ...\n", wait, retry+1)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+		home = c.fetchLevel(ctx, []queueItem{{url: seed, depth: 0}}, root)[0]
+		pg = home.page
+	}
+	fetched = 1
+
+	switch {
+	case pg.Err != "" && pg.StatusCode == 0:
+		fmt.Printf("  ✗ 首页无法访问（%s），整站跳过\n", pg.Err)
+		return nil
+	case pg.Err != "":
+		fmt.Printf("  ✗ 首页 %s，冷却重试仍失败，跳过该站\n", pg.Err)
+		return nil
+	}
+
+	fmt.Printf("  ✓ %-3d %-90s 链接 %d / 邮箱 %d\n",
+		pg.StatusCode, shorten(pg.URL, 90), pg.LinkCount, pg.EmailCount)
+
+	// ---- 组装下一层队列：优先路径在前，链接页（需 --all-links）在后 ----
+	var next []queueItem
+	if len(c.cfg.PriorityPaths) > 0 {
+		if probes := c.buildPriorityQueue(u, visited); len(probes) > 0 {
+			fmt.Printf("  优先探测 %d 条联系页候选路径 ...\n", len(probes))
+			next = append(next, probes...)
+		}
+	}
+	if c.cfg.AllLinks && c.cfg.Depth >= 1 {
+		for _, l := range home.links {
+			if !l.Crawlable {
+				continue
+			}
+			key := canonicalURL(l.URL)
+			if visited[key] {
+				continue
+			}
+			visited[key] = true
+			next = append(next, queueItem{url: l.URL, depth: 1})
+		}
+	}
+
+	// ---- 后续层级 ----
+	probeHit, probeMiss := 0, 0
+	for len(next) > 0 {
 		remaining := c.cfg.MaxPages - fetched
 		if remaining <= 0 {
 			break
 		}
-		if len(current) > remaining {
-			current = current[:remaining]
+		if len(next) > remaining {
+			next = next[:remaining]
 		}
-		fetched += len(current)
+		fetched += len(next)
 
-		results := c.fetchLevel(ctx, current, root)
-
-		probeHit, probeMiss := 0, 0
-		var next []queueItem
+		results := c.fetchLevel(ctx, next, root)
+		next = nil
 		for _, r := range results {
 			if r.page == nil {
 				continue
-			}
-			// 首页都打不开（DNS 挂/超时/拒连）→ 整站跳过，不再烧 25 个探测请求
-			if r.item.depth == 0 && r.page.Err != "" && !r.item.probe {
-				homeFailed = true
 			}
 			if r.page.Err != "" {
 				if r.item.probe {
@@ -137,11 +189,8 @@ func (c *Crawler) CrawlSite(ctx context.Context, seed string) error {
 					r.page.StatusCode, shorten(r.page.URL, 90), r.page.LinkCount, r.page.EmailCount)
 			}
 
-			if r.item.depth >= c.cfg.Depth {
-				continue
-			}
 			// 默认只抓「首页 + 优先路径」；开关打开后才跟进页面里的其他链接
-			if !c.cfg.AllLinks {
+			if r.item.depth >= c.cfg.Depth || !c.cfg.AllLinks {
 				continue
 			}
 			for _, l := range r.links {
@@ -156,21 +205,9 @@ func (c *Crawler) CrawlSite(ctx context.Context, seed string) error {
 				next = append(next, queueItem{url: l.URL, depth: r.item.depth + 1})
 			}
 		}
-
-		// 首页抓完后，把优先路径探测排到队列最前面
-		if priorityPending {
-			priorityPending = false
-			if homeFailed {
-				fmt.Printf("  首页抓取失败（%s），跳过 %d 条优先路径探测\n", firstErr(results), len(c.cfg.PriorityPaths))
-			} else if probes := c.buildPriorityQueue(u, visited); len(probes) > 0 {
-				fmt.Printf("  优先探测 %d 条联系页候选路径 ...\n", len(probes))
-				next = append(probes, next...)
-			}
-		}
-		if probeHit+probeMiss > 0 {
-			fmt.Printf("  优先路径：命中 %d，未命中 %d\n", probeHit, probeMiss)
-		}
-		current = next
+	}
+	if probeHit+probeMiss > 0 {
+		fmt.Printf("  优先路径：命中 %d，未命中 %d\n", probeHit, probeMiss)
 	}
 
 	nPages, nLinks, nMail := c.countFor(root)
@@ -185,16 +222,6 @@ func (c *Crawler) CrawlSite(ctx context.Context, seed string) error {
 		fmt.Printf("  站点 %s 完成[%s]：页面 %d，链接 %d，邮箱 %d\n", root, mode, nPages, nLinks, nMail)
 	}
 	return nil
-}
-
-// firstErr 返回首页的失败原因，用于日志。
-func firstErr(results []fetchResult) string {
-	for _, r := range results {
-		if r.item.depth == 0 && r.page != nil && r.page.Err != "" {
-			return r.page.Err
-		}
-	}
-	return "未知"
 }
 
 // buildPriorityQueue 把默认/自定义的优先路径转成待探测队列。
