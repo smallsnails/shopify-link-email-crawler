@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -276,6 +277,7 @@ func run() error {
 			case <-ctx.Done():
 				fmt.Printf("[中止] 补抓取消\n")
 			case <-time.After(90 * time.Second):
+				cr.ResetBlocked()
 				for _, seed := range blocked {
 					if ctx.Err() != nil {
 						break
@@ -286,6 +288,17 @@ func run() error {
 					}
 				}
 			}
+		}
+	}
+
+	// 补抓后仍被 429 挡住（或干脆拒绝访问）的站点，写成清单方便换个时间重跑
+	if failed := cr.BlockedSeeds(); len(failed) > 0 {
+		path := retryListPath(cfg.Output)
+		if err := writeLines(path, failed); err != nil {
+			fmt.Printf("[提示] %d 个站点仍被 429 拒绝，但写入 %s 失败: %v\n", len(failed), path, err)
+		} else {
+			fmt.Printf("\n[提示] %d 个站点仍被 429 拒绝，已写入 %s\n", len(failed), path)
+			fmt.Printf("       稍后（建议隔 1 小时以上）用 -f %s 单独重跑这几站\n", path)
 		}
 	}
 
@@ -327,6 +340,31 @@ func readLines(path string) ([]string, error) {
 		out = append(out, line)
 	}
 	return out, sc.Err()
+}
+
+// writeLines 把字符串写入文件，每行一个。
+func writeLines(path string, lines []string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil && filepath.Dir(path) != "." {
+		return err
+	}
+	var b strings.Builder
+	b.WriteString("# 以下站点因持续 HTTP 429 未能抓取，建议隔 1 小时以上单独重跑\n")
+	for _, l := range lines {
+		b.WriteString(l)
+		b.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+// retryListPath 由输出文件名派生失败清单路径：output/x.xlsx -> output/x-429.txt
+func retryListPath(output string) string {
+	dir := filepath.Dir(output)
+	base := filepath.Base(output)
+	ext := filepath.Ext(base)
+	if ext != "" {
+		base = strings.TrimSuffix(base, ext)
+	}
+	return filepath.Join(dir, base+"-429.txt")
 }
 
 // normalizeSeed 把用户输入补全为完整 URL。

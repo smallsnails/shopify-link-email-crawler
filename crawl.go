@@ -135,7 +135,16 @@ func (c *Crawler) CrawlSite(ctx context.Context, seed string) error {
 			// 持续 429：记入待重试名单，等批次跑完 IP 冷却后再补一轮
 			fmt.Printf("  ⏸ 首页持续 HTTP 429，记入待重试名单（批次结束后自动补抓）\n")
 			c.mu.Lock()
-			c.blocked = append(c.blocked, seed)
+			dup := false
+			for _, b := range c.blocked {
+				if b == seed {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				c.blocked = append(c.blocked, seed)
+			}
 			c.mu.Unlock()
 		} else {
 			fmt.Printf("  ✗ 首页 %s，跳过该站\n", pg.Err)
@@ -512,6 +521,13 @@ func (c *Crawler) VerifyLinks(ctx context.Context) {
 		}
 	}
 	fmt.Printf("  已校验 %d 个链接\n", len(targets))
+}
+
+// ResetBlocked 清空受阻名单（补抓前调用，便于统计补抓后仍失败的站点）。
+func (c *Crawler) ResetBlocked() {
+	c.mu.Lock()
+	c.blocked = nil
+	c.mu.Unlock()
 }
 
 // BlockedSeeds 返回因持续 429 而未能抓取的站点清单。

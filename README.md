@@ -109,6 +109,32 @@ gymshark.com
 - 探测页跟随重定向（如 `/support` → `support.xxx.com`），重定向后的页面照常提取邮箱
 - 优先探测占用 `--max-pages` 名额：`max-pages=100` 时约剩 75 个名额给链接页
 
+### 邮箱汇总的「归属」列
+
+邮箱汇总表新增一列 `归属`，取值 `本店域名` / `第三方`：
+
+- `本店域名` = 邮箱域名与店铺主域一致，如 `info@stasherbag.com`
+- `第三方` = 物流商、建站插件、代运营等外部邮箱，如 `customerservice@bluedart.com`（物流）、
+  `walid.bendris@klaviyo.com`（Klaviyo 插件）、`support@succulentsbox.freshdesk.com`（Freshdesk 客服系统）
+
+在 Excel 里对「归属」列做筛选，只勾 `本店域名` 即可剔掉这类噪声。注意部分店铺用 Gmail 作为
+官方邮箱（如 `geekvapestore@gmail.com`），这类也会被标为 `第三方`，需要人工保留。
+
+### 429 失败清单
+
+跑完后若仍有站点持续 429，会在输出文件旁生成同名 `-429.txt`，形如：
+
+```
+output/uni-top-part50-6.xlsx
+output/uni-top-part50-6-429.txt   ← 只含未抓到的站点
+```
+
+隔 1 小时以上用 `-f` 单独重跑这份清单即可，不必整批重来：
+
+```bash
+./shopify-crawler.exe -f output/uni-top-part50-6-429.txt -o output/retry.xlsx --verify=false
+```
+
 ### 链接（`extract.go`）
 
 排除：

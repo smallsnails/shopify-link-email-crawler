@@ -193,3 +193,22 @@ func TestExtractEmailsFromPage(t *testing.T) {
 		}
 	}
 }
+
+func TestEmailOwnership(t *testing.T) {
+	cases := []struct {
+		siteDomain, email, want string
+	}{
+		{"stasherbag.com", "info@stasherbag.com", "本店域名"},
+		{"stasherbag.com", "wave@www.stasherbag.com", "本店域名"},
+		{"housenama.com", "customerservice@bluedart.com", "第三方"},
+		{"housenama.com", "csbom@bluedart.com", "第三方"},
+		{"taylorswift.com", "walid.bendris@klaviyo.com", "第三方"},
+		{"succulentsbox.com", "support@succulentsbox.freshdesk.com", "第三方"},
+		{"geekvape.com", "geekvapestore@gmail.com", "第三方"},
+	}
+	for _, c := range cases {
+		if got := emailOwnership(&EmailHit{Domain: c.siteDomain, Email: c.email}); got != c.want {
+			t.Errorf("%s @ %s: got %s, want %s", c.email, c.siteDomain, got, c.want)
+		}
+	}
+}

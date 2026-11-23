@@ -56,23 +56,23 @@ func ExportExcel(path string, s *Snapshot, cfg *Config) error {
 	// ---------------- 邮箱汇总 ----------------
 	{
 		sh := sheetEmails
-		head := []interface{}{"序号", "来源域名", "来源页面", "邮箱", "邮箱类型", "抓取方式"}
+		head := []interface{}{"序号", "来源域名", "来源页面", "邮箱", "邮箱类型", "归属", "抓取方式"}
 		writeHeader(f, sh, head, st.header)
 		row := 2
 		for i, e := range s.Emails {
 			_ = f.SetSheetRow(sh, "A"+strconv.Itoa(row), &[]interface{}{
-				i + 1, e.Domain, e.SourcePage, e.Email, e.Type, methodLabel(e.Method),
+				i + 1, e.Domain, e.SourcePage, e.Email, e.Type, emailOwnership(e), methodLabel(e.Method),
 			})
-			_ = f.SetCellStyle(sh, "A"+strconv.Itoa(row), "F"+strconv.Itoa(row), st.text)
+			_ = f.SetCellStyle(sh, "A"+strconv.Itoa(row), "G"+strconv.Itoa(row), st.text)
 			_ = f.SetCellHyperLink(sh, "C"+strconv.Itoa(row), e.SourcePage, "External")
 			_ = f.SetCellStyle(sh, "C"+strconv.Itoa(row), "C"+strconv.Itoa(row), st.link)
 			row++
 		}
 		if len(s.Emails) == 0 {
-			_ = f.SetSheetRow(sh, "A2", &[]interface{}{"-", "-", "-", "未发现有效邮箱", "-", "-"})
+			_ = f.SetSheetRow(sh, "A2", &[]interface{}{"-", "-", "-", "未发现有效邮箱", "-", "-", "-"})
 		}
-		freezeAndFilter(f, sh, "F", row-1)
-		setWidths(f, sh, map[string]float64{"A": 6, "B": 26, "C": 60, "D": 34, "E": 12, "F": 12})
+		freezeAndFilter(f, sh, "G", row-1)
+		setWidths(f, sh, map[string]float64{"A": 6, "B": 26, "C": 60, "D": 34, "E": 12, "F": 12, "G": 12})
 	}
 
 	// ---------------- 链接清单 ----------------
@@ -395,6 +395,23 @@ func statusCell(code int) interface{} {
 }
 
 // URLOrDash 空字符串统一显示为 -。
+// emailOwnership 判断邮箱是否属于店铺自身域名。
+// 抓取中常见第三方邮箱（物流商、建站插件），标出来后可在 Excel 里一键筛掉。
+func emailOwnership(e *EmailHit) string {
+	i := strings.LastIndex(e.Email, "@")
+	if i < 0 || i == len(e.Email)-1 {
+		return "未知"
+	}
+	dom := strings.ToLower(e.Email[i+1:])
+	if dom == e.Domain || strings.HasSuffix(dom, "."+e.Domain) {
+		return "本店域名"
+	}
+	if siteKey(dom) == siteKey(e.Domain) {
+		return "本店域名"
+	}
+	return "第三方"
+}
+
 func dashIfEmpty(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return "-"
